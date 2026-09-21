@@ -2,6 +2,7 @@ package com.next.bypass;
 
 import android.content.Context;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -15,15 +16,21 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /**
  * Xposed module to bypass verification checks in BreenoNext (com.oplus.claw).
  *
- * Supported versions: 170066, 170068, 170069, 170070, 170071, 170072
+ * Supported versions: 170066, 170068, 170069, 170070, 170071, 170072, 170073+
  *
- * Each version uses different obfuscated class names but shares the same logic.
- * Version detection is done by checking which gate controller class exists.
+ * Obfuscated class names change in every release. Up to 170072 the names are
+ * hard-coded per version; from 170073 onwards the relevant classes are located
+ * dynamically at runtime with DexKit by matching on string literals that the
+ * obfuscator does not rename.
  */
 public class HookEntry implements IXposedHookLoadPackage {
 
     private static final String TARGET = "com.oplus.claw";
     private static final String TAG = "BreenoNextBypass";
+    private static final String PKG = "com.oplus.claw.welcome.";
+
+    /** Newest version handled by the hard-coded class table. */
+    private static final int V170073 = 170073;
 
     private ClassLoader cl;
     private int version;
@@ -35,6 +42,9 @@ public class HookEntry implements IXposedHookLoadPackage {
     private static final int V170070 = 170070;
     private static final int V170071 = 170071;
     private static final int V170072 = 170072;
+
+    /** Populated by DexKit for versions whose names are not hard-coded. */
+    private Resolved r;
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
@@ -48,6 +58,20 @@ public class HookEntry implements IXposedHookLoadPackage {
         }
         XposedBridge.log(TAG + ": Loaded into " + TARGET + " v" + version);
 
+        if (version >= V170073) {
+            // No stable names to hard-code: resolve everything with DexKit.
+            try {
+                r = DexKitResolver.resolve(lpparam);
+            } catch (Throwable e) {
+                XposedBridge.log(TAG + ": DexKit resolve failed — " + e);
+                r = null;
+            }
+            if (r == null || r.gate == null) {
+                XposedBridge.log(TAG + ": DexKit resolution incomplete, aborting");
+                return;
+            }
+        }
+
         hookAccessGate();
         hookPolicyState();
         hookRootDetection();
@@ -59,16 +83,19 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * Detect app version by checking which gate controller class exists.
+     * Detect app version.
      *
-     * The gate controller is the class with d(String) (Denied) and e() (Granted) methods.
-     * - 170072: k3 (distinguished from 170069 by t30.a class)
-     * - 170071: g3
-     * - 170070: n3
-     * - 170069: k3
-     * - 170066/170068: c3 (distinguished by a0/b0 classes)
+     * 170073 renamed every controller class but left a handful of its own
+     * symbols readable (AccessFailReason, BetaDeviceAccessPolicy$DeviceVerdict,
+     * ...). Those appear in no earlier build, so they identify 170073+.
+     * Older builds are recognised by their gate controller class.
      */
     private int detectVersion() {
+        if (classExists("com.oplus.claw.welcome.BetaDeviceAccessPolicy$DeviceVerdict")
+                || classExists("com.oplus.claw.welcome.AccessFailReason")
+                || classExists("com.oplus.claw.welcome.AccessSuccessReason")) {
+            return V170073;
+        }
         // 170071: g3 is the controller
         if (hasMethod("com.oplus.claw.welcome.g3", "d", String.class)) return V170071;
         // 170070: n3 is the controller
@@ -102,6 +129,12 @@ public class HookEntry implements IXposedHookLoadPackage {
 
     // ==================== Version-specific class getters ====================
 
+    /** Accepts either a bare name or a fully qualified one. */
+    private static String fq(String name) {
+        if (name == null) return null;
+        return name.indexOf('.') >= 0 ? name : PKG + name;
+    }
+
     /**
      * Gate controller class that manages access state.
      * - 170066/170068: c3
@@ -109,8 +142,10 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: n3
      * - 170071: g3
      * - 170072: k3
+     * - 170073+: resolved by DexKit
      */
     private String gateControllerClass() {
+        if (version >= V170073) return r != null ? r.gate : null;
         if (version <= V170068) return "c3";
         if (version == V170069) return "k3";
         if (version == V170070) return "n3";
@@ -119,14 +154,16 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * Granted state class with long constructor.
-     * - 170066/170068: z2(long)
+     * Granted/Ready state class with a long-only constructor.
+     * - 170066/170068: z2
      * - 170069: h2(i2, Long)
      * - 170070: k2(l2, Long)
-     * - 170071: d3(long)
-     * - 170072: h3(long)
+     * - 170071: d3
+     * - 170072: h3
+     * - 170073+: resolved by DexKit
      */
     private String grantedStateClass() {
+        if (version >= V170073) return r != null ? r.grantedState : null;
         if (version <= V170068) return "z2";
         if (version == V170069) return "h2";
         if (version == V170070) return "k2";
@@ -141,8 +178,10 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: q2
      * - 170071: k2
      * - 170072: n2
+     * - 170073+: resolved by DexKit
      */
     private String policyHolderClass() {
+        if (version >= V170073) return r != null ? r.policyHolder : null;
         if (version <= V170068) return "k4";
         if (version == V170069) return "n2";
         if (version == V170070) return "q2";
@@ -157,8 +196,10 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: n2
      * - 170071: h2
      * - 170072: k2
+     * - 170073+: resolved by DexKit
      */
     private String verdictEnumClass() {
+        if (version >= V170073) return r != null ? r.verdictEnum : null;
         if (version <= V170068) return "h4";
         if (version == V170069) return "k2";
         if (version == V170070) return "n2";
@@ -173,8 +214,10 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: z4
      * - 170071: s4
      * - 170072: w4
+     * - 170073+: resolved by DexKit
      */
     private String bootCheckClass() {
+        if (version >= V170073) return r != null ? r.bootCheck : null;
         if (version <= V170068) return "s4";
         if (version == V170069) return "w4";
         if (version == V170070) return "z4";
@@ -183,14 +226,16 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * ViewModel class with f(String, c) and h(boolean, boolean, String, boolean, c) methods.
-     * - 170066/170068: m1
+     * ViewModel class hosting the integrity check and the probe.
+     * - 170066/170068: m1   (f/h)
      * - 170069: n1
      * - 170070: q1
      * - 170071: k1
      * - 170072: o1
+     * - 170073+: resolved by DexKit (g/i)
      */
     private String viewModelClass() {
+        if (version >= V170073) return r != null ? r.viewModel : null;
         if (version <= V170068) return "m1";
         if (version == V170069) return "n1";
         if (version == V170070) return "q1";
@@ -199,14 +244,16 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * Coroutine continuation class for ViewModel methods.
+     * Coroutine continuation parameter type of the ViewModel methods.
      * - 170066/170068: x10.c
      * - 170069: e20.c
      * - 170070: h20.c
      * - 170071: y20.c
      * - 170072: k30.c
+     * - 170073+: kotlin.coroutines.jvm.internal.ContinuationImpl
      */
     private String continuationClass() {
+        if (version >= V170073) return r != null ? r.continuation : null;
         if (version <= V170068) return "x10.c";
         if (version == V170069) return "e20.c";
         if (version == V170070) return "h20.c";
@@ -215,14 +262,16 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * Idle state class (precheck bypass target).
+     * Idle state class used to short-circuit the precheck probe.
      * - 170066/170068: c1.f17845a
      * - 170069: e1.f15227a
      * - 170070: f1.f15998a
      * - 170071: b1.f17861a
      * - 170072: e1.f15787a
+     * - 170073+: resolved by DexKit
      */
     private String idleStateClass() {
+        if (version >= V170073) return r != null ? r.idleState : null;
         if (version <= V170068) return "c1";
         if (version == V170069) return "e1";
         if (version == V170070) return "f1";
@@ -231,6 +280,7 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     private String idleStateField() {
+        if (version >= V170073) return r != null ? r.idleField : null;
         if (version <= V170068) return "f17845a";
         if (version == V170069) return "f15227a";
         if (version == V170070) return "f15998a";
@@ -239,14 +289,16 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * Cached decision class returned by p.b(Context).
+     * Cached decision class returned by the encrypted cache accessor.
      * - 170066/170068: h2(long, String, String, boolean)
-     * - 170069: o2(long, String, String, boolean)
-     * - 170070: r2(long, String, String, boolean)
-     * - 170071: l2(long, String, String, boolean)
-     * - 170072: o2(long, String, String, boolean)
+     * - 170069: o2
+     * - 170070: r2
+     * - 170071: l2
+     * - 170072: o2
+     * - 170073+: resolved by DexKit
      */
     private String cachedDecisionClass() {
+        if (version >= V170073) return r != null ? r.cachedDecision : null;
         if (version <= V170068) return "h2";
         if (version == V170069) return "o2";
         if (version == V170070) return "r2";
@@ -255,11 +307,30 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
+     * Cached decision accessor class (the one exposing b(Context)).
+     * - 170066-170072: p
+     * - 170073+: resolved by DexKit
+     */
+    private String cachedDecisionAccessorClass() {
+        if (version >= V170073) return r != null ? r.cachedDecisionAccessor : null;
+        return "p";
+    }
+
+    /** Policy-check coroutine method name on the policy holder. */
+    private String betaVerifyMethod() {
+        return version >= V170073 ? "c" : "b";
+    }
+
+    /**
      * Beta verification method parameter types.
      * Each version uses different parameter type classes.
      */
     private Object[] betaVerifyParamTypes() {
         String cont = continuationClass();
+        if (version >= V170073) {
+            // 170073: policy.c(String, Boolean, cr.a, kotlinx.coroutines.w, ContinuationImpl)
+            return r != null ? r.betaVerifyParams : null;
+        }
         if (version <= V170068) {
             // 170066: k4.b(String, Boolean, g20.a, y20.x, x10.c)
             // 170068: k4.b(String, Boolean, g20.a, y20.y, x10.c)
@@ -287,31 +358,42 @@ public class HookEntry implements IXposedHookLoadPackage {
     /**
      * Hook 1: Access Gate Bypass
      *
-     * Blocks the gate from being set to Denied state.
-     * Also hooks the fallback method to return Ready/Allowed instead of "not ready".
+     * Blocks the gate from being set to Denied state and forces its fallback
+     * to report a Granted/Ready decision.
      *
      * Hook points:
      * - gate.d(String) → sets gate to Denied (replaced with no-op)
-     * - gate.f() → fallback that returns "not ready" (replaced with Ready state)
+     * - gate.f()      → "not ready" fallback (replaced with the Granted state)
      */
     private void hookAccessGate() {
-        String gate = "com.oplus.claw.welcome." + gateControllerClass();
+        String gate = fq(gateControllerClass());
+        if (gate == null) {
+            XposedBridge.log(TAG + ": hookAccessGate — gate class unresolved");
+            return;
+        }
 
         // Block gate.d(String) from setting Denied state
         boolean dOk = tryHook(gate, "d", String.class, XC_MethodReplacement.DO_NOTHING);
         XposedBridge.log(TAG + ": hookAccessGate " + gate + ".d(String) — " + (dOk ? "OK" : "FAILED"));
 
-        // Replace gate.f() fallback with Ready/Allowed state
+        // Replace gate.f() fallback with the Granted state
         try {
             final Object readyState = createReadyState();
             if (readyState != null) {
                 boolean fOk = tryHook(gate, "f", new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        param.setResult(readyState);
+                        // The fallback is typed as a failure wrapper; only override
+                        // when the Granted state is actually assignable to it.
+                        if (param.method instanceof Method
+                                && ((Method) param.method).getReturnType().isInstance(readyState)) {
+                            param.setResult(readyState);
+                        }
                     }
                 });
-                XposedBridge.log(TAG + ": hookAccessGate " + gate + ".f() → Ready — " + (fOk ? "OK" : "FAILED"));
+                XposedBridge.log(TAG + ": hookAccessGate " + gate + ".f() → Granted — " + (fOk ? "OK" : "FAILED"));
+            } else {
+                XposedBridge.log(TAG + ": hookAccessGate — could not build Granted state");
             }
         } catch (Throwable e) {
             XposedBridge.log(TAG + ": hookAccessGate fallback error — " + e.getMessage());
@@ -319,49 +401,41 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     /**
-     * Create a Ready/Allowed state object for the current version.
+     * Create a Granted/Ready state object for the current version.
      *
-     * - 170066/170068: z2(long) extends b3
-     * - 170069: h2(i2, Long) extends g2
-     * - 170070: k2(l2, Long) extends m2
-     * - 170071: d3(long) extends f3
+     * - 170066/170068: z2(long)
+     * - 170069: h2(i2, Long)
+     * - 170070: k2(l2, Long)
+     * - 170071: d3(long)
+     * - 170072: h3(long)
+     * - 170073+: t2(long)
      */
     private Object createReadyState() {
         try {
-            if (version <= V170068) {
-                // 170066/170068: z2(long) is the Granted state
-                Class<?> z2Class = XposedHelpers.findClass("com.oplus.claw.welcome.z2", cl);
-                return z2Class.getConstructor(long.class).newInstance(System.currentTimeMillis());
+            String granted = grantedStateClass();
+            if (granted == null) return null;
+            Class<?> cls = XposedHelpers.findClass(fq(granted), cl);
+
+            if (version >= V170073 || version == V170071 || version == V170072 || version <= V170068) {
+                return cls.getConstructor(long.class).newInstance(System.currentTimeMillis());
             }
             if (version == V170069) {
-                // 170069: h2(i2, Long) is the Allowed state
-                Class<?> h2Class = XposedHelpers.findClass("com.oplus.claw.welcome.h2", cl);
-                Object src = findStaticField("com.oplus.claw.welcome.i2", "a");
-                if (src == null) src = findStaticField("com.oplus.claw.welcome.i2", "f15306a");
+                // 170069: h2(i2, Long)
+                Object src = findStaticField(PKG + "i2", "a");
+                if (src == null) src = findStaticField(PKG + "i2", "f15306a");
                 if (src != null) {
-                    return h2Class.getConstructor(src.getClass(), Long.class)
+                    return cls.getConstructor(src.getClass(), Long.class)
                             .newInstance(src, System.currentTimeMillis());
                 }
             }
             if (version == V170070) {
-                // 170070: k2(l2, Long) is the Ready state
-                Class<?> k2Class = XposedHelpers.findClass("com.oplus.claw.welcome.k2", cl);
-                Object src = findStaticField("com.oplus.claw.welcome.l2", "f16102a");
-                if (src == null) src = findStaticField("com.oplus.claw.welcome.l2", "a");
+                // 170070: k2(l2, Long)
+                Object src = findStaticField(PKG + "l2", "f16102a");
+                if (src == null) src = findStaticField(PKG + "l2", "a");
                 if (src != null) {
-                    return k2Class.getConstructor(src.getClass(), Long.class)
+                    return cls.getConstructor(src.getClass(), Long.class)
                             .newInstance(src, System.currentTimeMillis());
                 }
-            }
-            if (version == V170071) {
-                // 170071: d3(long) is the Granted state
-                Class<?> d3Class = XposedHelpers.findClass("com.oplus.claw.welcome.d3", cl);
-                return d3Class.getConstructor(long.class).newInstance(System.currentTimeMillis());
-            }
-            if (version == V170072) {
-                // 170072: h3(long) is the Granted state
-                Class<?> h3Class = XposedHelpers.findClass("com.oplus.claw.welcome.h3", cl);
-                return h3Class.getConstructor(long.class).newInstance(System.currentTimeMillis());
             }
         } catch (Throwable e) {
             XposedBridge.log(TAG + ": createReadyState error — " + e.getMessage());
@@ -372,26 +446,27 @@ public class HookEntry implements IXposedHookLoadPackage {
     /**
      * Hook 2: Policy State Bypass
      *
-     * Intercepts AtomicReference.set() to block enforced+pending state
-     * which would cause "access_error_model_access_not_ready" errors.
+     * Intercepts AtomicReference.set() on the policy reference and refuses the
+     * "enforced + Pending" combination, which is what produces the
+     * "access_error_model_access_not_ready" failure.
      *
-     * Hook point:
-     * - AtomicReference.set(Object) on the policy reference
-     *   Blocks when: isEnforced=true AND verdict=Pending
+     * The state object exposes enforced in field 'a' and the verdict in 'c'.
      */
     private void hookPolicyState() {
         try {
-            String holder = "com.oplus.claw.welcome." + policyHolderClass();
-            String verdict = "com.oplus.claw.welcome." + verdictEnumClass();
+            String holder = fq(policyHolderClass());
+            String verdict = fq(verdictEnumClass());
+            if (holder == null || verdict == null) {
+                XposedBridge.log(TAG + ": hookPolicyState — classes unresolved");
+                return;
+            }
 
-            // Find the AtomicReference holding the policy state
             Object refObj = findStaticField(holder, "b");
             if (refObj == null) {
                 XposedBridge.log(TAG + ": hookPolicyState — ref not found in " + holder);
                 return;
             }
 
-            // Find the Pending verdict constant
             Object pending = findStaticField(verdict, "a");
             if (pending == null) {
                 XposedBridge.log(TAG + ": hookPolicyState — Pending not found in " + verdict);
@@ -410,14 +485,14 @@ public class HookEntry implements IXposedHookLoadPackage {
                     if (state == null) return;
 
                     boolean enforced = getBoolField(state, "a");
-                    Object verdict = getObjField(state, "c");
-                    if (enforced && verdict == pendingVerdict) {
+                    Object v = getObjField(state, "c");
+                    if (enforced && v == pendingVerdict) {
                         param.setResult(null);
                         XposedBridge.log(TAG + ": Blocked policy → enforced+pending");
                     }
                 }
             });
-            XposedBridge.log(TAG + ": hookPolicyState — OK");
+            XposedBridge.log(TAG + ": hookPolicyState " + holder + " — OK");
         } catch (Throwable e) {
             XposedBridge.log(TAG + ": hookPolicyState error — " + e.getMessage());
         }
@@ -426,11 +501,10 @@ public class HookEntry implements IXposedHookLoadPackage {
     /**
      * Hook 3: Root Detection Bypass
      *
-     * Returns false for root detection checks.
-     * The root detection class varies between versions and even builds.
-     * We try multiple known classes as fallback.
+     * Returns false for the root probe invoked by the integrity check.
      *
      * Hook points (tried in order):
+     * - 170073+: DexKit-resolved root probe
      * - 170072: a00.b.f()
      * - 170071: as.b.g()
      * - 170070: az.b.e()
@@ -441,6 +515,16 @@ public class HookEntry implements IXposedHookLoadPackage {
     private void hookRootDetection() {
         XC_MethodHook hook = setResultHook(false);
 
+        if (version >= V170073) {
+            String root = r != null ? r.rootCheck : null;
+            String method = r != null ? r.rootCheckMethod : null;
+            if (root != null) {
+                if (method != null && tryHook(root, method, hook)) return;
+                if (tryHook(root, "f", hook)) return;
+                if (tryHook(root, "g", hook)) return;
+                if (tryHook(root, "e", hook)) return;
+            }
+        }
         if (version >= V170072) {
             if (tryHook("a00.b", "f", hook)) return;
         }
@@ -471,22 +555,29 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: q2.b(String, Boolean, q20.a, i30.x, h20.c)
      * - 170071: k2.b(String, Boolean, h30.a, z30.x, y20.c)
      * - 170072: n2.b(String, Boolean, t30.a, l40.x, k30.c)
+     * - 170073+: h2.c(String, Boolean, cr.a, kotlinx.coroutines.w, ContinuationImpl)
      */
     private void hookBetaVerification() {
-        String cls = "com.oplus.claw.welcome." + policyHolderClass();
+        String cls = fq(policyHolderClass());
         Object[] params = betaVerifyParamTypes();
+        if (cls == null || params == null) {
+            XposedBridge.log(TAG + ": hookBetaVerification — unresolved");
+            return;
+        }
+
+        String methodName = betaVerifyMethod();
         Object[] args = new Object[params.length + 1];
         System.arraycopy(params, 0, args, 0, params.length);
         args[params.length] = setResultHook(false);
 
-        boolean ok = tryHookParams(cls, "b", args);
-        XposedBridge.log(TAG + ": hookBetaVerification " + cls + ".b(...) — " + (ok ? "OK" : "FAILED"));
+        boolean ok = tryHookParams(cls, methodName, args);
+        XposedBridge.log(TAG + ": hookBetaVerification " + cls + "." + methodName + "(...) — " + (ok ? "OK" : "FAILED"));
     }
 
     /**
      * Hook 5: Bootloader/Root Check Bypass
      *
-     * Returns false for the combined root+bootloader integrity check.
+     * Returns false for the combined root + bootloader integrity check.
      *
      * Hook points:
      * - 170066/170068: s4.i(Context)
@@ -494,17 +585,22 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: z4.i(Context)
      * - 170071: s4.i(Context)
      * - 170072: w4.i(Context)
+     * - 170073+: z3.i(Context)
      */
     private void hookBootloaderCheck() {
-        String cls = "com.oplus.claw.welcome." + bootCheckClass();
+        String cls = fq(bootCheckClass());
+        if (cls == null) {
+            XposedBridge.log(TAG + ": hookBootloaderCheck — unresolved");
+            return;
+        }
         boolean ok = tryHook(cls, "i", Context.class, setResultHook(false));
         XposedBridge.log(TAG + ": hookBootloaderCheck " + cls + ".i(Context) — " + (ok ? "OK" : "FAILED"));
     }
 
     /**
-     * Hook 6: ViewModel Root Check Bypass
+     * Hook 6: ViewModel Device-Integrity Check Bypass
      *
-     * Returns null to skip root status query in ViewModel.
+     * Returns null so the integrity verdict is never produced.
      *
      * Hook points:
      * - 170066/170068: m1.f(String, x10.c)
@@ -512,18 +608,26 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: q1.f(String, h20.c)
      * - 170071: k1.f(String, y20.c)
      * - 170072: o1.f(String, k30.c)
+     * - 170073+: q1.g(String, ContinuationImpl)
      */
     private void hookViewModelRootCheck() {
-        String cls = "com.oplus.claw.welcome." + viewModelClass();
+        String vm = viewModelClass();
         String cont = continuationClass();
-        boolean ok = tryHookParams(cls, "f", String.class, findClass(cont), setResultHook((Object) null));
-        XposedBridge.log(TAG + ": hookViewModelRootCheck " + cls + ".f(...) — " + (ok ? "OK" : "FAILED"));
+        if (vm == null || cont == null) {
+            XposedBridge.log(TAG + ": hookViewModelRootCheck — unresolved");
+            return;
+        }
+        String cls = fq(vm);
+        String methodName = version >= V170073 ? "g" : "f";
+        Object paramType = version >= V170073 ? cont : findClass(cont);
+        boolean ok = tryHookParams(cls, methodName, String.class, paramType, setResultHook((Object) null));
+        XposedBridge.log(TAG + ": hookViewModelRootCheck " + cls + "." + methodName + "(String, c) — " + (ok ? "OK" : "FAILED"));
     }
 
     /**
      * Hook 7: Precheck Bypass
      *
-     * Returns Idle state to skip the /precheck API call.
+     * Returns the Idle state to skip the /precheck network probe.
      *
      * Hook points:
      * - 170066/170068: m1.h(boolean, boolean, String, boolean, x10.c)
@@ -531,45 +635,80 @@ public class HookEntry implements IXposedHookLoadPackage {
      * - 170070: q1.h(boolean, boolean, String, boolean, h20.c)
      * - 170071: k1.h(boolean, boolean, String, boolean, y20.c)
      * - 170072: o1.h(boolean, boolean, String, boolean, k30.c)
+     * - 170073+: q1.i(boolean, boolean, String, boolean, ContinuationImpl)
      */
     private void hookPrecheckBypass() {
-        Object idle = findStaticField("com.oplus.claw.welcome." + idleStateClass(), idleStateField());
+        String idleShort = idleStateClass();
+        String idleField = idleStateField();
+        if (idleShort == null) {
+            XposedBridge.log(TAG + ": hookPrecheckBypass — idle state unresolved");
+            return;
+        }
+        Class<?> idleCls = findClass(idleShort);
+        Object idle = idleField != null ? findStaticField(fq(idleShort), idleField) : null;
+        String usedField = idleField;
         if (idle == null) {
-            XposedBridge.log(TAG + ": hookPrecheckBypass — idle state not found");
+            // Obfuscators rename fields between builds; the Idle state is always
+            // the singleton static field whose type is its own class.
+            for (Field f : idleCls.getDeclaredFields()) {
+                if (f.getType() == idleCls && java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                    try {
+                        f.setAccessible(true);
+                        idle = f.get(null);
+                        usedField = f.getName();
+                    } catch (Throwable ignored) {
+                    }
+                    if (idle != null) break;
+                }
+            }
+        }
+        if (idle == null) {
+            XposedBridge.log(TAG + ": hookPrecheckBypass — idle state not found in " + idleCls.getName());
             return;
         }
 
         final Object idleState = idle;
-        String cls = "com.oplus.claw.welcome." + viewModelClass();
+        String vm = viewModelClass();
         String cont = continuationClass();
+        if (vm == null || cont == null) return;
+        String cls = fq(vm);
+        String methodName = version >= V170073 ? "i" : "h";
+        Object paramType = version >= V170073 ? cont : findClass(cont);
 
-        boolean ok = tryHookParams(cls, "h",
+        boolean ok = tryHookParams(cls, methodName,
                 boolean.class, boolean.class, String.class, boolean.class,
-                findClass(cont), new XC_MethodHook() {
+                paramType, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
                         param.setResult(idleState);
                     }
                 });
-        XposedBridge.log(TAG + ": hookPrecheckBypass " + cls + ".h(...) — " + (ok ? "OK" : "FAILED"));
+        XposedBridge.log(TAG + ": hookPrecheckBypass " + cls + "." + methodName + "(...) [idle="
+                + idleCls.getSimpleName() + "." + usedField + "] — " + (ok ? "OK" : "FAILED"));
     }
 
     /**
      * Hook 8: Cached Decision Bypass
      *
-     * Returns a cached decision with isAllowed=true.
+     * Makes the encrypted cache report an allowed decision.
      *
      * Hook points:
-     * - p.b(Context) returns:
-     *   - 170066/170068: h2(long, String, String, boolean)
-     *   - 170069: o2(long, String, String, boolean)
-     *   - 170070: r2(long, String, String, boolean)
-     *   - 170071: l2(long, String, String, boolean)
-     *   - 170072: o2(long, String, String, boolean)
+     * - 170066/170068: p.b(Context) -> h2(long, String, String, boolean)
+     * - 170069: p.b(Context) -> o2
+     * - 170070: p.b(Context) -> r2
+     * - 170071: p.b(Context) -> l2
+     * - 170072: p.b(Context) -> o2
+     * - 170073+: t.b(Context)  -> i2
      */
     private void hookCachedDecision() {
         try {
-            final String clsName = "com.oplus.claw.welcome." + cachedDecisionClass();
+            String clsShort = cachedDecisionClass();
+            String accessor = cachedDecisionAccessorClass();
+            if (clsShort == null || accessor == null) {
+                XposedBridge.log(TAG + ": hookCachedDecision — unresolved");
+                return;
+            }
+            final String clsName = fq(clsShort);
             final Class<?> cls = XposedHelpers.findClass(clsName, cl);
 
             XC_MethodHook hook = new XC_MethodHook() {
@@ -582,7 +721,7 @@ public class HookEntry implements IXposedHookLoadPackage {
                 }
             };
 
-            boolean ok = tryHook("com.oplus.claw.welcome.p", "b", Context.class, hook);
+            boolean ok = tryHook(fq(accessor), "b", Context.class, hook);
             XposedBridge.log(TAG + ": hookCachedDecision " + clsName + " — " + (ok ? "OK" : "FAILED"));
         } catch (Throwable e) {
             XposedBridge.log(TAG + ": hookCachedDecision error — " + e.getMessage());
@@ -628,7 +767,7 @@ public class HookEntry implements IXposedHookLoadPackage {
     }
 
     private Class<?> findClass(String name) {
-        return XposedHelpers.findClass(name, cl);
+        return XposedHelpers.findClass(fq(name), cl);
     }
 
     private Object findStaticField(String className, String fieldName) {
@@ -662,5 +801,23 @@ public class HookEntry implements IXposedHookLoadPackage {
                 param.setResult(value);
             }
         };
+    }
+
+    /** Container for DexKit-resolved class and parameter names. */
+    static final class Resolved {
+        String gate;
+        String grantedState;
+        String policyHolder;
+        String verdictEnum;
+        String bootCheck;
+        String rootCheck;
+        String rootCheckMethod;
+        String viewModel;
+        String continuation;
+        String idleState;
+        String idleField;
+        String cachedDecision;
+        String cachedDecisionAccessor;
+        Object[] betaVerifyParams;
     }
 }

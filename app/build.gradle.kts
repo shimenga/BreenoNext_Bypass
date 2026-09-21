@@ -10,8 +10,8 @@ android {
         applicationId = "com.next.bypass"
         minSdk = 28
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.6"
+        versionCode = 8
+        versionName = "1.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -33,4 +33,5 @@ android {
 
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
+    implementation(libs.dexkit)
 }
