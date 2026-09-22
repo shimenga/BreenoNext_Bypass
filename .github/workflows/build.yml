@@ -35,14 +35,65 @@ jobs:
       - name: Build release APK
         run: ./gradlew assembleRelease
 
+      - name: Decode keystore
+        run: |
+          mkdir -p signing
+          printf '%s' "${{ secrets.KEYSTORE_BASE64 }}" \
+            | tr -d '\r\n \t' \
+            | base64 -d > signing/release.keystore
+          size=$(stat -c%s signing/release.keystore)
+          magic=$(od -An -tx1 -N4 signing/release.keystore | tr -d ' \n')
+          echo "decoded bytes: $size"
+          echo "magic: $magic"
+          if [ "$magic" = "feedfeed" ]; then
+            storetype=JKS
+          else
+            storetype=PKCS12
+          fi
+          echo "detected keystore type: $storetype"
+          echo "STORETYPE=$storetype" >> "$GITHUB_ENV"
+
+      - name: Inspect keystore
+        continue-on-error: true
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          keytool -list -v \
+            -keystore signing/release.keystore \
+            -storetype "$STORETYPE" \
+            -storepass "$KEYSTORE_PASSWORD" \
+          || echo "::warning::keytool could not open the keystore - check KEYSTORE_BASE64 / KEYSTORE_PASSWORD"
+
       - name: Sign APK
-        uses: r0adkll/sign-android-release@v1
-        with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.KEYSTORE_BASE64 }}
-          alias: ${{ secrets.KEY_ALIAS }}
-          keyStorePassword: ${{ secrets.KEYSTORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/34.* | sort -V | tail -1)
+          echo "using build-tools: $BT"
+          out=app/build/outputs/apk/release/app-release-signed.apk
+          "$BT/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk signing/aligned.apk
+          args=(sign
+            --ks signing/release.keystore
+            --ks-type "$STORETYPE"
+            --ks-key-alias "$KEY_ALIAS"
+            --ks-pass env:KEYSTORE_PASSWORD
+            --out "$out"
+            signing/aligned.apk)
+          if [ -n "${KEY_PASSWORD:-}" ]; then
+            args=(sign
+              --ks signing/release.keystore
+              --ks-type "$STORETYPE"
+              --ks-key-alias "$KEY_ALIAS"
+              --ks-pass env:KEYSTORE_PASSWORD
+              --key-pass env:KEY_PASSWORD
+              --out "$out"
+              signing/aligned.apk)
+          fi
+          "$BT/apksigner" "${args[@]}"
+          "$BT/apksigner" verify --verbose "$out"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
